@@ -68,6 +68,9 @@ def load_market_daily_for_period(start_date: str, end_date: str, token: str) -> 
 
     pro = ts.pro_api(token)
     dates = trading_dates_from_index("CSI500", "000905.SH", start_date, end_date)
+    if not dates:
+        cal = pro.trade_cal(exchange="SSE", start_date=start_date, end_date=end_date, is_open="1")
+        dates = sorted(cal["cal_date"].astype(str).tolist())
     frames = []
     for i, d in enumerate(dates, 1):
         part = pro.daily(trade_date=d)
@@ -76,6 +79,8 @@ def load_market_daily_for_period(start_date: str, end_date: str, token: str) -> 
             frames.append(part[keep])
         if i % 50 == 0:
             print(f"downloaded stock daily {start_date}-{end_date}: {i}/{len(dates)}", flush=True)
+    if not frames:
+        raise RuntimeError(f"No stock daily data downloaded for {start_date}-{end_date}")
     out = pd.concat(frames, ignore_index=True)
     out["trade_date"] = pd.to_datetime(out["trade_date"])
     for col in ["open", "high", "low", "close", "pct_chg", "vol", "amount"]:
@@ -225,7 +230,8 @@ def build_constituent_features(index_name: str, index_code: str, start_date: str
 
 def run(args: argparse.Namespace) -> None:
     token = args.token or os.environ.get("TUSHARE_TOKEN", "813912102bfd4aae584b4aafe45289757157dcd6a1ec4f7ae188da1c")
-    if not token and not (DATA_DIR / f"stock_daily_all_{args.start_date}_{args.end_date}.parquet").exists():
+    data_start_date = args.data_start_date or args.start_date
+    if not token and not (DATA_DIR / f"stock_daily_all_{data_start_date}_{args.end_date}.parquet").exists():
         raise SystemExit("Missing token for stock-level download.")
     rows = []
     perf_rows = []
@@ -234,21 +240,23 @@ def run(args: argparse.Namespace) -> None:
         code = INDEXES[index_name]
         px_path = DATA_DIR / f"{index_name}_{code}_20150101_20260902.csv"
         px = pd.read_csv(px_path, parse_dates=["trade_date"]).set_index("trade_date").sort_index()
-        px = px[(px.index >= pd.to_datetime(args.start_date)) & (px.index <= pd.to_datetime(args.end_date))]
-        features = build_constituent_features(index_name, code, args.start_date, args.end_date, token)
+        px = px[(px.index >= pd.to_datetime(data_start_date)) & (px.index <= pd.to_datetime(args.end_date))]
+        features = build_constituent_features(index_name, code, data_start_date, args.end_date, token).reindex(px.index)
+        backtest_mask = px.index >= pd.to_datetime(args.start_date)
         for h in [5, 20]:
             future = px["close"].pct_change(h).shift(-h)
-            ic = factor_ic(features, future)
+            ic = factor_ic(features.loc[backtest_mask], future.loc[backtest_mask])
             ic.insert(0, "horizon", h)
             ic.insert(0, "index", index_name)
             rows.append(ic)
-        ic20 = factor_ic(features, px["close"].pct_change(20).shift(-20))
+        ic20 = factor_ic(features.loc[backtest_mask], px["close"].pct_change(20).shift(-20).loc[backtest_mask])
         selected = ic20.loc[ic20["spearman_ic"].abs() > args.min_abs_ic, "factor"].head(args.top_n).tolist()
         if selected:
             score = pd.concat([np.sign(ic20.set_index("factor").loc[c, "spearman_ic"]) * zscore(features[c], 252) for c in selected], axis=1).mean(axis=1)
             score = score.reindex(px.index)
             for mode in ["zero_threshold", "top_quantile", "weekly_hold", "monthly_hold"]:
                 ret = timing_returns(px["close"], score, mode, args.cost_bps)
+                ret = ret.loc[ret.index >= pd.to_datetime(args.start_date)]
                 st = perf_stats(ret)
                 bench = benchmark_stats(index_name, ret)
                 st.update(
@@ -269,7 +277,8 @@ def run(args: argparse.Namespace) -> None:
     perf_out.to_csv(OUT_DIR / "constituent_strategy_performance.csv", index=False)
 
     md = ["# 成分股穿透因子研究\n"]
-    md.append(f"- 样本：{args.start_date} 至 {args.end_date}")
+    md.append(f"- 数据：{data_start_date} 至 {args.end_date}")
+    md.append(f"- 绩效统计：{args.start_date} 至 {args.end_date}")
     md.append("- 成分股：使用 Tushare 月度 index_weight 权重快照，按目标指数交易日前向匹配")
     md.append("- 个股数据：日频行情，构造成分股广度、动量扩散、成交额集中度、均线覆盖率、振幅等穿透因子\n")
     md.append("## 20日 IC 前列")
@@ -283,6 +292,7 @@ def run(args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--start-date", default="20200101")
+    parser.add_argument("--data-start-date", default="")
     parser.add_argument("--end-date", default="20260902")
     parser.add_argument("--indexes", nargs="+", default=["CSI500", "CSI1000", "STAR50"])
     parser.add_argument("--token", default="")

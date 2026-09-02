@@ -72,9 +72,10 @@ def rotation_score(
 def run(args: argparse.Namespace) -> None:
     rows = []
     top_factor_rows = []
+    data_start_date = args.data_start_date or args.start_date
     for index_name in args.indexes:
-        px = load_price(index_name, args.start_date, args.end_date)
-        features = load_constituent_features(index_name, args.start_date, args.end_date).reindex(px.index)
+        px = load_price(index_name, data_start_date, args.end_date)
+        features = load_constituent_features(index_name, data_start_date, args.end_date).reindex(px.index)
         for window in args.windows:
             for top_n in args.top_ns:
                 score, weights = rotation_score(
@@ -87,6 +88,7 @@ def run(args: argparse.Namespace) -> None:
                 )
                 for mode in args.modes:
                     ret = timing_returns(px["close"], score.reindex(px.index), mode, args.cost_bps)
+                    ret = ret.loc[ret.index >= pd.to_datetime(args.start_date)]
                     st = perf_stats(ret)
                     bench = benchmark_stats(index_name, ret)
                     st.update(
@@ -119,24 +121,27 @@ def run(args: argparse.Namespace) -> None:
     OUT_DIR.mkdir(exist_ok=True)
     perf = pd.DataFrame(rows).sort_values("sharpe", ascending=False)
     factors = pd.DataFrame(top_factor_rows)
-    perf.to_csv(OUT_DIR / f"factor_rotation_performance_{args.start_date}_{args.end_date}.csv", index=False)
-    factors.to_csv(OUT_DIR / f"factor_rotation_recent_weights_{args.start_date}_{args.end_date}.csv", index=False)
+    suffix = f"{data_start_date}_data_{args.start_date}_bt_{args.end_date}"
+    perf.to_csv(OUT_DIR / f"factor_rotation_performance_{suffix}.csv", index=False)
+    factors.to_csv(OUT_DIR / f"factor_rotation_recent_weights_{suffix}.csv", index=False)
 
     md = ["# 成分股穿透因子轮动结果\n"]
-    md.append(f"- 样本：{args.start_date} 至 {args.end_date}")
+    md.append(f"- 数据：{data_start_date} 至 {args.end_date}")
+    md.append(f"- 绩效统计：{args.start_date} 至 {args.end_date}")
     md.append(f"- 目标：未来 {args.horizon} 日收益")
     md.append(f"- 规则：滚动窗口内按 ICIR、方向胜率、收益贡献筛选因子；仅保留胜率不低于 {args.min_win_rate:.0%} 的因子；按质量分数加权。\n")
     md.append("## 策略表现前二十")
     md.append(perf.head(20).to_markdown(index=False, floatfmt=".4f"))
     md.append("\n## 最近一年平均入选权重")
     md.append(factors.sort_values(["index", "recent_avg_weight"], ascending=[True, False]).groupby("index", group_keys=False).head(12).to_markdown(index=False, floatfmt=".4f"))
-    (OUT_DIR / f"factor_rotation_summary_{args.start_date}_{args.end_date}.md").write_text("\n".join(md), encoding="utf-8")
-    print((OUT_DIR / f"factor_rotation_summary_{args.start_date}_{args.end_date}.md").read_text(encoding="utf-8"))
+    (OUT_DIR / f"factor_rotation_summary_{suffix}.md").write_text("\n".join(md), encoding="utf-8")
+    print((OUT_DIR / f"factor_rotation_summary_{suffix}.md").read_text(encoding="utf-8"))
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--start-date", default="20160101")
+    parser.add_argument("--data-start-date", default="")
     parser.add_argument("--end-date", default="20260902")
     parser.add_argument("--indexes", nargs="+", default=["CSI500", "CSI1000", "STAR50"])
     parser.add_argument("--horizon", type=int, default=20)
