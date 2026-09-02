@@ -5,13 +5,20 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy import stats
 
 
 INDEXES = {
     "CSI500": "000905.SH",
     "CSI1000": "000852.SH",
     "STAR50": "000688.SH",
+}
+
+EXTERNAL_INDEXES = {
+    "SSE": "000001.SH",
+    "CSI300": "000300.SH",
+    "SSE50": "000016.SH",
+    "CHINEXT": "399006.SZ",
+    "CSIALL": "000985.CSI",
 }
 
 
@@ -57,6 +64,12 @@ def load_from_tushare(ts_code: str, start_date: str, end_date: str, token: str) 
     return raw[cols].apply(pd.to_numeric, errors="coerce")
 
 
+def get_pro(token: str):
+    import tushare as ts
+
+    return ts.pro_api(token)
+
+
 def get_index_data(name: str, ts_code: str, start_date: str, end_date: str, token: str, data_dir: Path) -> pd.DataFrame:
     data_dir.mkdir(parents=True, exist_ok=True)
     path = data_dir / f"{name}_{ts_code}_{start_date}_{end_date}.csv"
@@ -66,6 +79,133 @@ def get_index_data(name: str, ts_code: str, start_date: str, end_date: str, toke
     df = load_from_tushare(ts_code, start_date, end_date, token)
     df.to_csv(path, index_label="trade_date")
     return df
+
+
+def get_external_index_panel(start_date: str, end_date: str, token: str, data_dir: Path) -> pd.DataFrame:
+    pieces = []
+    for name, code in EXTERNAL_INDEXES.items():
+        df = get_index_data(name, code, start_date, end_date, token, data_dir)
+        renamed = df[["close", "amount"]].rename(columns={"close": f"{name}_close", "amount": f"{name}_amount"})
+        pieces.append(renamed)
+    return pd.concat(pieces, axis=1).sort_index()
+
+
+def date_slices(start_date: str, end_date: str) -> list[tuple[str, str]]:
+    starts = pd.date_range(start=start_date, end=end_date, freq="YS").strftime("%Y%m%d").tolist()
+    if start_date not in starts:
+        starts = [start_date] + starts
+    ends = (pd.to_datetime(starts[1:]) - pd.Timedelta(days=1)).strftime("%Y%m%d").tolist() + [end_date]
+    return list(zip(starts, ends))
+
+
+def fetch_by_periods(start_date: str, end_date: str, fetcher) -> pd.DataFrame:
+    frames = []
+    for s, e in date_slices(start_date, end_date):
+        part = fetcher(s, e)
+        if part is not None and not part.empty:
+            frames.append(part)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+def fetch_table_cache(name: str, token: str, data_dir: Path, start_date: str, end_date: str, fetcher) -> pd.DataFrame:
+    path = data_dir / f"external_{name}_{start_date}_{end_date}.csv"
+    if path.exists():
+        return pd.read_csv(path, parse_dates=["trade_date"]).set_index("trade_date").sort_index()
+    df = fetch_by_periods(start_date, end_date, fetcher)
+    if df.empty:
+        return df
+    df["trade_date"] = pd.to_datetime(df["trade_date"])
+    df = df.sort_values("trade_date").drop_duplicates("trade_date").set_index("trade_date")
+    df.to_csv(path, index_label="trade_date")
+    return df
+
+
+def get_optional_external_tables(start_date: str, end_date: str, token: str, data_dir: Path) -> dict[str, pd.DataFrame]:
+    pro = get_pro(token)
+    tables = {}
+
+    def safe_fetch(label: str, func):
+        try:
+            tables[label] = fetch_table_cache(label, token, data_dir, start_date, end_date, func)
+        except Exception as exc:
+            print(f"WARN: skip {label}: {exc}")
+            tables[label] = pd.DataFrame()
+
+    safe_fetch(
+        "shibor",
+        lambda s, e: pro.shibor(start_date=s, end_date=e).rename(columns={"date": "trade_date"}),
+    )
+    safe_fetch(
+        "margin",
+        lambda s, e: pro.margin(start_date=s, end_date=e),
+    )
+    safe_fetch(
+        "moneyflow_hsgt",
+        lambda s, e: pro.moneyflow_hsgt(start_date=s, end_date=e),
+    )
+    return tables
+
+
+def build_external_features(
+    target_close: pd.Series,
+    external_panel: pd.DataFrame,
+    optional_tables: dict[str, pd.DataFrame],
+) -> pd.DataFrame:
+    aligned = external_panel.reindex(target_close.index).ffill()
+    features = pd.DataFrame(index=target_close.index)
+
+    for name in EXTERNAL_INDEXES:
+        close = aligned[f"{name}_close"]
+        amount = aligned[f"{name}_amount"]
+        for w in [20, 60, 120]:
+            features[f"ext_{name}_mom_{w}d"] = close.pct_change(w)
+        features[f"ext_{name}_amount_ratio_20d"] = amount / amount.rolling(20).mean() - 1
+
+    features["ext_small_vs_large_60d"] = aligned["CSIALL_close"].pct_change(60) - aligned["SSE50_close"].pct_change(60)
+    features["ext_growth_vs_value_60d"] = aligned["CHINEXT_close"].pct_change(60) - aligned["CSI300_close"].pct_change(60)
+    features["ext_target_vs_csi300_60d"] = target_close.pct_change(60) - aligned["CSI300_close"].pct_change(60)
+    features["ext_csi300_trend_confirm"] = np.sign(aligned["CSI300_close"].pct_change(60)) * np.sign(target_close.pct_change(20))
+    features["ext_market_amount_heat"] = zscore(aligned[[f"{n}_amount" for n in EXTERNAL_INDEXES]].sum(axis=1), 252)
+
+    shibor = optional_tables.get("shibor", pd.DataFrame())
+    if not shibor.empty:
+        shibor = shibor.reindex(target_close.index).ffill()
+        for col in ["on", "1w", "1m", "3m"]:
+            if col in shibor:
+                features[f"ext_shibor_{col}_level"] = -shibor[col].astype(float)
+                features[f"ext_shibor_{col}_change_20d"] = -shibor[col].astype(float).diff(20)
+        if {"3m", "on"}.issubset(shibor.columns):
+            features["ext_shibor_term_spread_3m_on"] = -(shibor["3m"].astype(float) - shibor["on"].astype(float))
+
+    margin = optional_tables.get("margin", pd.DataFrame())
+    if not margin.empty:
+        margin = margin.reindex(target_close.index).ffill()
+        for col in ["rzye", "rqye", "rzmre", "rzche"]:
+            if col in margin:
+                x = margin[col].astype(float)
+                features[f"ext_margin_{col}_change_20d"] = x.pct_change(20)
+        if {"rzmre", "rzche"}.issubset(margin.columns):
+            features["ext_margin_financing_buy_repay"] = margin["rzmre"].astype(float) / margin["rzche"].replace(0, np.nan).astype(float) - 1
+
+    hsgt = optional_tables.get("moneyflow_hsgt", pd.DataFrame())
+    if not hsgt.empty:
+        hsgt = hsgt.reindex(target_close.index).ffill()
+        for col in ["north_money", "south_money"]:
+            if col in hsgt:
+                x = hsgt[col].astype(float)
+                features[f"ext_hsgt_{col}_20d"] = x.rolling(20).sum()
+                features[f"ext_hsgt_{col}_z"] = zscore(x, 252)
+
+    return features.replace([np.inf, -np.inf], np.nan)
+
+
+def mean_available(parts: list[pd.Series]) -> pd.Series:
+    valid = [p for p in parts if p is not None]
+    if not valid:
+        return pd.Series(dtype=float)
+    return pd.concat(valid, axis=1).mean(axis=1)
 
 
 def zscore(s: pd.Series, window: int = 252) -> pd.Series:
@@ -202,9 +342,29 @@ def run(args: argparse.Namespace) -> None:
     all_ic = []
     all_perf = []
     all_daily = []
+    external_panel = get_external_index_panel(args.start_date, args.end_date, token, data_dir)
+    optional_tables = get_optional_external_tables(args.start_date, args.end_date, token, data_dir)
     for name, code in INDEXES.items():
         df = get_index_data(name, code, args.start_date, args.end_date, token, data_dir)
-        factors = build_factors(df)
+        internal_factors = build_factors(df)
+        external_factors = build_external_features(df["close"], external_panel, optional_tables)
+        internal_factors = internal_factors.add_prefix("int_")
+        factors = pd.concat([internal_factors, external_factors], axis=1)
+        factors["hybrid_trend_liquidity"] = mean_available(
+            [
+                zscore(factors["int_trend_vote"], 252) if "int_trend_vote" in factors else None,
+                zscore(factors["ext_market_amount_heat"], 252) if "ext_market_amount_heat" in factors else None,
+                zscore(factors["ext_small_vs_large_60d"], 252) if "ext_small_vs_large_60d" in factors else None,
+            ]
+        )
+        factors["hybrid_external_risk_on"] = mean_available(
+            [
+                zscore(factors["ext_CSI300_mom_60d"], 252) if "ext_CSI300_mom_60d" in factors else None,
+                zscore(factors["ext_growth_vs_value_60d"], 252) if "ext_growth_vs_value_60d" in factors else None,
+                zscore(factors["ext_hsgt_north_money_20d"], 252) if "ext_hsgt_north_money_20d" in factors else None,
+                zscore(factors["ext_margin_rzye_change_20d"], 252) if "ext_margin_rzye_change_20d" in factors else None,
+            ]
+        )
         for h in [1, 5, 20]:
             future_ret = df["close"].pct_change(h).shift(-h)
             ic = factor_ic(factors, future_ret)
@@ -217,7 +377,14 @@ def run(args: argparse.Namespace) -> None:
         comp = composite_signal(factors, selected)
         factors["composite"] = comp
         factors["rolling_ic_composite"] = rolling_oriented_score(factors, df["close"], horizon=5)
-        selected = selected + ["composite", "rolling_ic_composite", "trend_vote", "defensive_trend"]
+        selected = selected + [
+            "composite",
+            "rolling_ic_composite",
+            "int_trend_vote",
+            "int_defensive_trend",
+            "hybrid_trend_liquidity",
+            "hybrid_external_risk_on",
+        ]
         for factor in dict.fromkeys(selected):
             strat = timing_backtest(df["close"], factors, factor, args.cost_bps)
             bench = df["close"].pct_change().reindex(strat.index)
@@ -242,6 +409,11 @@ def run(args: argparse.Namespace) -> None:
     summary.append(f"- 样本：{args.start_date} 至 {args.end_date}")
     summary.append(f"- 交易成本：单边 {args.cost_bps:.1f} bps")
     summary.append("- 信号：当日收盘形成，次一交易日生效\n")
+    summary.append("## 外生数据")
+    summary.append("- 宽基/风格指数：上证指数、沪深300、上证50、创业板指、中证全指")
+    summary.append("- 可选资金利率：SHIBOR")
+    summary.append("- 可选资金情绪：融资融券、沪深港通资金流")
+    summary.append("- 所有外生数据按目标指数交易日对齐并前向填充，交易信号仍滞后一日执行\n")
     summary.append("## 夏普最高的策略")
     top = perf_out.groupby("index", group_keys=False).head(5)
     summary.append(top.to_markdown(index=False, floatfmt=".4f"))
