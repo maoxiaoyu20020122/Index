@@ -1,0 +1,7 @@
+index,strategy,mode,ann_ret,sharpe,max_drawdown,source
+CSI1000,constituent_selected_ic20,weekly_hold,0.1283032441288694,0.848888616155939,-0.2204817614093217,constituent_crowding
+CSI1000,targeted_CSI1000,zero_threshold,0.1470656106249592,0.8414247425835607,-0.2390939311817235,previous_enhanced
+CSI500,constituent_selected_ic20,weekly_hold,0.1162049759496,0.8774929461727419,-0.2159319258768526,constituent_crowding
+CSI500,targeted_CSI500,zero_threshold,0.1213716524860231,0.7351387531220442,-0.2646528240554237,previous_enhanced
+STAR50,constituent_selected_ic20,weekly_hold,0.167765636221715,0.8538608248526889,-0.2080378112308454,constituent_crowding
+STAR50,targeted_STAR50_smooth20,zero_threshold,0.2183837406059758,0.7636621580440779,-0.3583850451879037,previous_enhanced
