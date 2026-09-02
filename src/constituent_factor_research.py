@@ -59,7 +59,7 @@ def trading_dates_from_index(index_name: str, index_code: str, start_date: str, 
     return df.loc[mask, "trade_date"].dt.strftime("%Y%m%d").tolist()
 
 
-def load_market_daily(start_date: str, end_date: str, token: str) -> pd.DataFrame:
+def load_market_daily_for_period(start_date: str, end_date: str, token: str) -> pd.DataFrame:
     path = DATA_DIR / f"stock_daily_all_{start_date}_{end_date}.parquet"
     if path.exists():
         return pd.read_parquet(path)
@@ -74,12 +74,34 @@ def load_market_daily(start_date: str, end_date: str, token: str) -> pd.DataFram
         if part is not None and not part.empty:
             keep = ["ts_code", "trade_date", "open", "high", "low", "close", "pct_chg", "vol", "amount"]
             frames.append(part[keep])
-        if i % 100 == 0:
-            print(f"downloaded stock daily {i}/{len(dates)}")
+        if i % 50 == 0:
+            print(f"downloaded stock daily {start_date}-{end_date}: {i}/{len(dates)}", flush=True)
     out = pd.concat(frames, ignore_index=True)
     out["trade_date"] = pd.to_datetime(out["trade_date"])
     for col in ["open", "high", "low", "close", "pct_chg", "vol", "amount"]:
         out[col] = pd.to_numeric(out[col], errors="coerce")
+    out.to_parquet(path, index=False)
+    return out
+
+
+def load_market_daily(start_date: str, end_date: str, token: str) -> pd.DataFrame:
+    path = DATA_DIR / f"stock_daily_all_{start_date}_{end_date}.parquet"
+    if path.exists():
+        return pd.read_parquet(path)
+
+    existing_2020 = DATA_DIR / "stock_daily_all_20200101_20260902.parquet"
+    frames = []
+    for year in range(pd.to_datetime(start_date).year, pd.to_datetime(end_date).year + 1):
+        ys = max(pd.Timestamp(year=year, month=1, day=1), pd.to_datetime(start_date)).strftime("%Y%m%d")
+        ye = min(pd.Timestamp(year=year, month=12, day=31), pd.to_datetime(end_date)).strftime("%Y%m%d")
+        if existing_2020.exists() and year >= 2020:
+            full = pd.read_parquet(existing_2020)
+            full["trade_date"] = pd.to_datetime(full["trade_date"])
+            mask = (full["trade_date"] >= pd.to_datetime(ys)) & (full["trade_date"] <= pd.to_datetime(ye))
+            frames.append(full.loc[mask])
+        else:
+            frames.append(load_market_daily_for_period(ys, ye, token))
+    out = pd.concat(frames, ignore_index=True).drop_duplicates(["ts_code", "trade_date"])
     out.to_parquet(path, index=False)
     return out
 
