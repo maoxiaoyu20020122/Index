@@ -1,0 +1,4 @@
+index,plot,mode,window,top_n,ann_ret,sharpe,max_drawdown,benchmark_ann_ret,benchmark_sharpe,benchmark_max_drawdown
+CSI500,/Users/gerendiannao/Documents/ChatGPT/指数择时/outputs/plots/CSI500_factor_rotation_warmup_2014_bt_2016_2026.png,weekly_hold,504,8,0.09625488638759361,0.7210625980155408,-0.17697832494459886,0.0030317908598636034,0.013193224406973396,-0.4312645022929933
+CSI1000,/Users/gerendiannao/Documents/ChatGPT/指数择时/outputs/plots/CSI1000_factor_rotation_warmup_2014_bt_2016_2026.png,weekly_hold,504,4,0.08921780322222972,0.5954279336586198,-0.23485870310093915,-0.03084275870242581,-0.12232194330848789,-0.57264384088225
+STAR50,/Users/gerendiannao/Documents/ChatGPT/指数择时/outputs/plots/STAR50_factor_rotation_warmup_2014_bt_2016_2026.png,monthly_hold,504,8,0.10846027042263273,0.5838582215007525,-0.24663977317758412,0.08091715326807125,0.2378250930008704,-0.626567472120988
