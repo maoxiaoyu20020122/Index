@@ -20,6 +20,12 @@ BEST_CONFIGS = {
     "STAR50": {"window": 504, "top_n": 8, "mode": "monthly_hold"},
 }
 
+EARLY_SIGNAL_CONFIGS = {
+    "CSI500": {"window": 126, "top_n": 6, "mode": "monthly_hold"},
+    "CSI1000": {"window": 126, "top_n": 4, "mode": "monthly_hold"},
+    "STAR50": {"window": 126, "top_n": 6, "mode": "monthly_hold"},
+}
+
 
 def nav_from_returns(ret: pd.Series) -> pd.Series:
     ret = ret.dropna()
@@ -27,7 +33,8 @@ def nav_from_returns(ret: pd.Series) -> pd.Series:
 
 
 def plot_one(index_name: str, args: argparse.Namespace) -> dict:
-    cfg = BEST_CONFIGS[index_name]
+    configs = EARLY_SIGNAL_CONFIGS if args.profile == "early_signal" else BEST_CONFIGS
+    cfg = configs[index_name]
     px = load_price(index_name, args.data_start_date, args.end_date)
     features = load_constituent_features(index_name, args.data_start_date, args.end_date).reindex(px.index)
     score, _ = rotation_score(
@@ -55,7 +62,7 @@ def plot_one(index_name: str, args: argparse.Namespace) -> dict:
     bench_stats = perf_stats(bench_ret)
     title = (
         f"{index_name} factor rotation vs benchmark\n"
-        f"{args.data_start_date} warmup, {args.start_date}-{args.end_date} backtest"
+        f"{args.data_start_date} warmup, {args.start_date}-{args.end_date} backtest, {args.profile}"
     )
     subtitle = (
         f"Strategy ann {stats['ann_ret']:.2%}, Sharpe {stats['sharpe']:.2f}, "
@@ -76,7 +83,7 @@ def plot_one(index_name: str, args: argparse.Namespace) -> dict:
     fig.autofmt_xdate()
     fig.tight_layout()
 
-    out = PLOT_DIR / f"{index_name}_factor_rotation_warmup_2014_bt_2016_2026.png"
+    out = PLOT_DIR / f"{index_name}_factor_rotation_{args.profile}_warmup_2014_bt_2016_2026.png"
     fig.savefig(out, dpi=160)
     plt.close(fig)
 
@@ -111,6 +118,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--horizon", type=int, default=20)
     parser.add_argument("--min-win-rate", type=float, default=0.50)
     parser.add_argument("--cost-bps", type=float, default=2.0)
+    parser.add_argument("--profile", choices=["best_sharpe", "early_signal"], default="best_sharpe")
     return parser.parse_args()
 
 
